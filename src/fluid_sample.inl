@@ -4,8 +4,8 @@ f32 Fluid_Sample(Fluid *fluid, f32 px, f32 py)
     f32 h = fluid->cell_size;
     f32 inv_h = 1.0f / h;
 
-    f32 x = (Clamp(px, h, (f32)(fluid->grid_dim_x) * h));
-    f32 y = (Clamp(py, h, (f32)(fluid->grid_dim_y) * h));
+    f32 x = (clamp_f32(px, h, (f32)(fluid->grid_dim_x) * h));
+    f32 y = (clamp_f32(py, h, (f32)(fluid->grid_dim_y) * h));
 
 #define u1 0
 #define v1 1

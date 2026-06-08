@@ -1,3 +1,5 @@
+// Generate keyframes from code.
+
 #include "raylib.h"
 
 float tonemap(float x)

@@ -101,7 +101,7 @@ int main(int argc, char *argv[])
 {
     InitWindow(800, 600, __FILE__);
     SetTargetFPS(60);
-    Font font = LoadFontEx("GoogleSansCode-Regular.ttf", 64, 0, 0);
+    Font font = LoadFontEx("assets/GoogleSansCode-Regular.ttf", 64, 0, 0);
     Camera2D camera = CameraFromRectangle(0.0f, 0.0f, 4.0f);
 
     float t = 0.0f;

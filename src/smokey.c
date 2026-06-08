@@ -1,3 +1,6 @@
+#ifdef NDEBUG
+#undef NDEBUG // Hour of debugging... thanks CMake!!!!!
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -12,23 +15,25 @@
 #define PROJECTION_ITERATIONS  100
 #define HEAT_CONSTANT          6.0f
 #define INTERACTION_RADIUS     20
-#define CONTROL_PENALTY        0.0002f
+#define CONTROL_PENALTY        0.00001f
 
 #define for_n(I,A,B) for (int I = (A); I < (B); I++)
 #define get(FIELD,X,Y) (fluid->FIELD[(Y)*(fluid->grid_dim_x)+(X)])
 #define copy(DST,SRC) for (int _i = 0; _i < fluid->cell_count; _i++) fluid->DST[_i] = fluid->SRC[_i]
 #define info(FMT,...) printf("\x1b[92mINFO: " FMT "\x1b[0m\n", __VA_ARGS__)
-#if 1
+#if 0
 #   define LOG(...) printf(__VA_ARGS__)
 #else
 #   define LOG(...) (void)0
 #endif
-#if 1
 float global_regularization_term;
 float global_data_term;
+#if 0
 #   define ACCUMULATE_REGULARIZATION(X) global_regularization_term += (X)
 #   define ACCUMULATE_DATA(X)           global_data_term += (X)
 #else
+#   define ACCUMULATE_REGULARIZATION(X)
+#   define ACCUMULATE_DATA(X)
 #endif
 
 typedef float f32;
@@ -90,6 +95,13 @@ void __enzyme_autodiff_void(void*, ...);
 int min_int(int a, int b)
 {
     return a < b ? a : b;
+}
+
+f32 clamp_f32(float x, float min, float max)
+{
+    if (x < min) return min;
+    if (x > max) return max;
+    return x;
 }
 
 f32 random_f32(void)
@@ -497,8 +509,8 @@ f32 MatchKeyframe(Fluid *fluid, Wind_Force *controls, int control_count, Keyfram
     //LOG("t = %.4f, data = %.5f\n", t, data_term);
     //LOG("t = %.4f, reg. = %.5f\n", t, regularization_term);
     //LOG("%.4f, %.5f\n", t, data_term);
-    //ACCUMULATE_DATA(data_term);
-    //ACCUMULATE_REGULARIZATION(regularization_term);
+    ACCUMULATE_DATA(data_term);
+    ACCUMULATE_REGULARIZATION(regularization_term);
     return data_term + regularization_term;
 }
 
@@ -580,7 +592,7 @@ void SaveControls(const char *filename, Wind_Force *controls, size_t count)
     assert(fwrite(&count, sizeof(count), 1, f) == 1);
     assert(fwrite(controls, sizeof(Wind_Force), count, f) == count);
     assert(fclose(f) == 0);
-    info("[%s] Saved controls", filename);
+    info("[%s] Saved controls (count = %zu)", filename, count);
 }
 
 Wind_Force *LoadControls(const char *filename, int *out_count)
@@ -603,16 +615,6 @@ Wind_Force *RandomControls(Fluid *fluid, int count)
     Wind_Force *forces = malloc(count * sizeof(Wind_Force));
     for_n(i, 0, count)
     {
-        (void)fluid;
-        //forces[i] = (Wind_Force) {
-        //    .x = random_f32() * (f32)(fluid->grid_dim_x) * fluid->cell_size,
-        //    .y = random_f32() * (f32)(fluid->grid_dim_y) * fluid->cell_size,
-        //    .radius = random_f32() * 200.0f,
-        //    .theta = random_f32() * 2.0f * (f32)(M_PI),
-        //    .strength = random_f32() * 100.0f,
-        //    .t = random_f32() * 60.0f,
-        //    .interval = random_f32() * 2.0f,
-        //};
         forces[i] = (Wind_Force) {
             .x        = random_range_f32(200.0f, 270.0f),
             .y        = random_range_f32(270.0f, 200.0f),
@@ -622,7 +624,6 @@ Wind_Force *RandomControls(Fluid *fluid, int count)
             .t        = random_range_f32(0.7f, 0.6f),
             .interval = random_range_f32(1.0f, 0.05f),
         };
-        //forces[i] = (Wind_Force) {1.0f, 1.0f, 1.0sf, 1.0f, 1.0f, 1.0f, 1.0f};
     }
     return forces;
 }
@@ -718,6 +719,8 @@ void Controls_Copy(Wind_Force *dst_controls, Wind_Force *src_controls, int count
 Keyframe LoadKeyframe(const char *filename)
 {
     Image image = LoadImage(filename);
+    assert(image.data != NULL);
+
     Keyframe frame = {
         .dim_x = image.width,
         .dim_y = image.height,
@@ -871,15 +874,18 @@ int test(const char *name)
         return test_finitediff();
     else if (strcmp(name, "run") == 0)
         return test_run();
-    assert(false);
+    return 1;
 }
 
 int main(int argc, char *argv[])
 {
     // Parse command line
     int optimize = 0;
+    int stop_at_final_timestep = 0;
     char *control_filename = 0;
     for (int i = 1; i < argc; ++i) if (0);
+        else if (strcmp(argv[i], "stop") == 0)
+            stop_at_final_timestep = 1;
         else if (strcmp(argv[i], "opt") == 0)
             optimize = 1;
         else if (strcmp(argv[i], "load") == 0 && i + 1 < argc)
@@ -897,7 +903,7 @@ int main(int argc, char *argv[])
     }
     Fluid_Reset(&fluid);
 
-    int control_count = 200;
+    int control_count = 400;
     Wind_Force *controls;
 
     if (control_filename)
@@ -909,20 +915,20 @@ int main(int argc, char *argv[])
     Keyframe target_keyframe = LoadKeyframe("target.smoke.png");
     Fluid_Set(&fluid, &initial_keyframe);
 
+    Parameters parameters = {
+        .num_timesteps = 100,
+        .step_size = STEP_SIZE,
+        .final_t = (f32)(100) * STEP_SIZE,
+    };
+
     if (optimize)
     {
         SaveControls("initial.controls", controls, control_count);
-        Parameters parameters = {
-            .num_timesteps = 100,
-            .step_size = STEP_SIZE,
-            .final_t = (f32)(100) * STEP_SIZE,
-        };
-        (void)parameters;
         Wind_Force *d_controls = ZeroControls(control_count);
         Adam adam = Adam_InitAndClear(control_count);
 
         printf("Begin optimization!\n");
-        for (int iter = 1; iter <= 1000; iter++)
+        for (int iter = 1; iter <= 2000; iter++)
         {
             // Setup initial state
             Fluid_Reset(&fluid);
@@ -955,7 +961,7 @@ int main(int argc, char *argv[])
             }
 
             // Update controls
-            Controls_Update(controls, d_controls, control_count, -0.001f);
+            Controls_Update(controls, d_controls, control_count, -0.00025f);
             //Controls_UpdateAdam(controls, d_controls, control_count, iter, &adam, 0.0000001f, 0.9f, 0.999f);
 
             const char* optimized_filename = TextFormat("optimized_%i.controls", iter);
@@ -1004,6 +1010,11 @@ int main(int argc, char *argv[])
             Fluid_Update(&fluid, controls, control_count, t, dt);
             t += dt;
             step += 1;
+
+            if (stop_at_final_timestep && step == parameters.num_timesteps)
+            {
+                simulate = false;
+            }
         }
         BeginDrawing();
         ClearBackground(BLACK);
