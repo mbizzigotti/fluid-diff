@@ -1,3 +1,4 @@
+.vscode/
 build/
-*.controls
-*.smoke.png
+out_*/
+anim_*/

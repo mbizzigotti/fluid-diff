@@ -6,12 +6,11 @@ typedef float f32;
 
 typedef struct {
     f32 *s;
-    f32 *u1; // X-velocity
-    f32 *u2;
-    f32 *v1; // Y-velocity
-    f32 *v2;
-    f32 *m1; // smoke density
-    f32 *m2;
+    f32 *u; // X-velocity
+    f32 *v; // Y-velocity
+    f32 *m; // smoke density
+    f32 *t1;
+    f32 *t2;
     f32 cell_size;
     int cell_count;
     int grid_dim_x;
@@ -52,6 +51,7 @@ enum Method {
 
 typedef struct {
     const char *name;
+    int framerate;
     int method;
     f32 step_size;
     f32 cell_size;
@@ -67,5 +67,22 @@ typedef struct {
     Wind_Force *mean;
     Wind_Force *velocity;
 } Adam;
+
+#ifdef INCLUDE_OPTIMIZATION
+
+typedef struct {
+    char        output_dir[128];
+    Fluid       fluid;
+    Fluid       d_fluid;
+    Wind_Force *controls;
+    Wind_Force *d_controls;
+    Keyframe    initial;
+    Keyframe    target;
+    Parameters  parameters;
+    int         control_count;
+    int         iter;
+} Fluid_Objective_Data;
+
+#endif // INCLUDE_OPTIMIZATION
 
 #endif // FLUID_H

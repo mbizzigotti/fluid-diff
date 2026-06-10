@@ -7,19 +7,19 @@ f32 Fluid_Sample(Fluid *fluid, f32 px, f32 py)
     f32 x = (clamp_f32(px, h, (f32)(fluid->grid_dim_x) * h));
     f32 y = (clamp_f32(py, h, (f32)(fluid->grid_dim_y) * h));
 
-#define u1 0
-#define v1 1
-#define m1 2
-#if field == u1
+#define u 0
+#define v 1
+#define m 2
+#if field == u
     y -= 0.5f * h;
-#elif field == v1
+#elif field == v
     x -= 0.5f * h;
-#elif field == m1
+#elif field == m
     x -= 0.5f * h; y -= 0.5f * h;
 #endif
-#undef u1
-#undef v1
-#undef m1
+#undef u
+#undef v
+#undef m
 
     // Compute indices
     int x0 = min_int((int)(floorf(x*inv_h)), fluid->grid_dim_x - 1);

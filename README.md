@@ -1,6 +1,8 @@
 # fluid-diff
 Differentiable fluid simulation
 
+![./renders/cse291.gif](./renders/cse291.gif)
+
 # Build Instructions
 
 ## Prerequisite Libraries

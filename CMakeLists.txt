@@ -10,8 +10,10 @@ find_package(NLopt REQUIRED)
 
 # MAIN Smoke Simulation
 
-add_executable(smokey src/smokey.c)
+add_executable(smokey src/smokey.c src/3rdparty/lbfgs.c)
 
+target_compile_options(smokey PRIVATE -march=native)
+target_compile_definitions(smokey PRIVATE "LBFGS_FLOAT=32")
 target_link_libraries(smokey PRIVATE raylib ClangEnzymeFlags NLopt::nlopt)
 
 # TOOLS
@@ -28,4 +30,4 @@ add_executable(gaussian tests/gaussian.c)
 add_executable(test_nlopt tests/nlopt.c)
 
 target_link_libraries(gaussian PRIVATE raylib ClangEnzymeFlags)
-target_link_libraries(test_nlopt PRIVATE NLopt::nlopt)
+target_link_libraries(test_nlopt PRIVATE NLopt::nlopt m)

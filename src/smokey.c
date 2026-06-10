@@ -1,29 +1,28 @@
 #ifdef NDEBUG
 #undef NDEBUG // Hour of debugging... thanks CMake!!!!!
 #endif
+#define INCLUDE_OPTIMIZATION
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include "nlopt.h"
+#include "3rdparty/lbfgs.h"
 #include "raylib.h"
 #include "raymath.h"
 #include "fluid.h"
-#include "nlopt.h"
+#include "controls.h"
+#include "config.h"
 
 #define PROJECTION_ITERATIONS  100
 #define HEAT_CONSTANT          6.0f
 #define INTERACTION_RADIUS     20
-#define CONTROL_PENALTY        0.00001f
+#define CONTROL_PENALTY        0.000005f
 
-#define for_n(I,A,B) for (int I = (A); I < (B); I++)
 #define get(FIELD,X,Y) (fluid->FIELD[(Y)*(fluid->grid_dim_x)+(X)])
 #define copy(DST,SRC) for (int _i = 0; _i < fluid->cell_count; _i++) fluid->DST[_i] = fluid->SRC[_i]
-#define info(FMT,...) printf("\x1b[92mINFO: " FMT "\x1b[0m\n", __VA_ARGS__)
-#if 0
-#   define LOG(...) printf(__VA_ARGS__)
-#else
-#   define LOG(...) (void)0
-#endif
+
+// NOTE: Use this to fine tune the control penalty
 float global_regularization_term;
 float global_data_term;
 #if 0
@@ -46,67 +45,23 @@ float __enzyme_fwddiff(void*, ...);
 float __enzyme_autodiff(void*, ...);
 void __enzyme_autodiff_void(void*, ...);
 
-int min_int(int a, int b)
-{
-    return a < b ? a : b;
-}
-
-f32 clamp_f32(float x, float min, float max)
-{
-    if (x < min) return min;
-    if (x > max) return max;
-    return x;
-}
-
-f32 random_f32(void)
-{
-    return (f32)(rand()) / (f32)(RAND_MAX);
-}
-
-f32 random_range_f32(f32 avg, f32 spread)
-{
-    return spread * (random_f32() - 0.5f) + avg;
-}
-
-int IsValidKeyframe(Fluid *fluid, Keyframe *frame)
-{
-    return (fluid->grid_dim_x == frame->dim_x + 2) && (fluid->grid_dim_y == frame->dim_y + 2);
-}
-
-f32 *Controls_ToFloatArray(Wind_Force *controls, int control_count, int* count)
-{
-    if (count != 0)
-        *count = control_count * (sizeof(Wind_Force) / sizeof(f32));
-    return (f32*)(controls);
-}
-
-void *alloc(size_t size, size_t n)
-{
-    size_t const alignment = 256;
-    size_t a = size * n;
-    size_t b = (a + alignment - 1) / alignment;
-    size_t c = b * alignment;
-    return aligned_alloc(alignment, c);
-}
-
 Fluid Fluid_Create(f32 cell_size, int width, int height)
 {
     int dim_x = width + 2;
     int dim_y = height + 2;
     int cell_count = dim_x * dim_y;
-    f32 *base = alloc(sizeof(f32) * cell_count, 7);
+    f32 *base = alloc(sizeof(f32) * cell_count, 6);
     return (Fluid) {
         .cell_size = cell_size,
         .cell_count = cell_count,
         .grid_dim_x = dim_x,
         .grid_dim_y = dim_y,
         .s  = base + cell_count*0,
-        .u1 = base + cell_count*1,
-        .u2 = base + cell_count*2,
-        .v1 = base + cell_count*3,
-        .v2 = base + cell_count*4,
-        .m1 = base + cell_count*5,
-        .m2 = base + cell_count*6,
+        .u  = base + cell_count*1,
+        .v  = base + cell_count*2,
+        .m  = base + cell_count*3,
+        .t1 = base + cell_count*4,
+        .t2 = base + cell_count*5,
     };
 }
 
@@ -115,12 +70,11 @@ void Fluid_Reset(Fluid *fluid)
     for_n(i,0,fluid->cell_count)
     {
         fluid->s[i] = 1.0f;
-        fluid->u1[i] = 0.0f;
-        fluid->u2[i] = 0.0f;
-        fluid->v1[i] = 0.0f;
-        fluid->v2[i] = 0.0f;
-        fluid->m1[i] = 0.0f;
-        fluid->m2[i] = 0.0f;
+        fluid->u[i] = 0.0f;
+        fluid->v[i] = 0.0f;
+        fluid->m[i] = 0.0f;
+        fluid->t1[i] = 0.0f;
+        fluid->t2[i] = 0.0f;
     }
     for_n(x, 0, fluid->grid_dim_x)
     {
@@ -149,7 +103,7 @@ void Fluid_Set(Fluid *fluid, Keyframe *frame)
     for_n(y, 0, frame->dim_y)
     for_n(x, 0, frame->dim_x)
     {
-        get(m1, x+1, y+1) = frame->values[y*frame->dim_x+x];
+        get(m, x+1, y+1) = frame->values[y*frame->dim_x+x];
     }
 }
 
@@ -170,43 +124,43 @@ void Interact(Fluid *fluid, Interection_Type type, Vector2 position, f32 radius,
         f32 t = Vector2Distance(cell_center, position) / radius;
         if (get(s, x, y) != 0.0f && t < 1.0f)
         {
-            f32 strength = 1.0 - t * t;
+            f32 strength = 1.0f - t * t;
             switch (type) {
             break;case Interact_Smoke:
             {
-                get(m1, x, y) += strength * 0.15;
+                get(m, x, y) += strength * 0.15f;
             }
             break;case Interact_Velocity:
             {
-                get(u1, x, y) += strength * 20 * dx;
-                get(v1, x, y) += strength * 20 * dy;
+                get(u, x, y) += strength * 20.0f * dx;
+                get(v, x, y) += strength * 20.0f * dy;
             }
             break;case Interact_Smoke_And_Velocity:
             {
-                get(u1, x, y) += strength * 20 * dx;
-                get(v1, x, y) += strength * 20 * dy;
-                get(m1, x, y) += strength * 0.15;
+                get(u, x, y) += strength * 20.0f * dx;
+                get(v, x, y) += strength * 20.0f * dy;
+                get(m, x, y) += strength * 0.15f;
             }
             break;case Interact_Obstacle:
             {
-                get(s, x, y) = 0.0;
-                get(m1, x, y) = 0;
-                get(u1, x, y) = 0.0;
-                get(v1, x, y) = 0.0;
+                get(s, x, y) = 0.0f;
+                get(m, x, y) = 0.0f;
+                get(u, x, y) = 0.0f;
+                get(v, x, y) = 0.0f;
             }
             }
         }
     }
 }
 
-void Fluid_Draw(Fluid *fluid, Wind_Force *forces, int force_count, f32 t)
+void Fluid_Draw(Fluid *fluid, Wind_Force *forces, int force_count, f32 t, bool draw_for_render, bool draw_controls)
 {
     f32 h = fluid->cell_size;
     for_n(y, 0, fluid->grid_dim_y)
     for_n(x, 0, fluid->grid_dim_x)
     {
         f32 force_strength = 0.0f;
-        for_n(i, 0, force_count)
+        if (draw_controls && !draw_for_render) for_n(i, 0, force_count)
         {
             f32 cell_center_x = (f32)(x)*h + h*0.5f;
             f32 cell_center_y = (f32)(y)*h + h*0.5f;
@@ -223,10 +177,11 @@ void Fluid_Draw(Fluid *fluid, Wind_Force *forces, int force_count, f32 t)
         Vector2 size = { h, h };
         if (get(s, x, y) == 0.0f)
         {
-            DrawRectangleV(position, size, SKYBLUE);
+            if (!draw_for_render) DrawRectangleV(position, size, SKYBLUE);
             continue;
         }
-        f32 value = get(m1, x, y);
+        f32 c = draw_for_render ? 5.0f : 1.0f;
+        f32 value = c * get(m, x, y);
         Color smoke = ColorAlpha(WHITE, value / (value + 1.0f));
         Color force = ColorAlpha(RED, force_strength * 0.01f);
         DrawRectangleV(position, size, ColorAlphaBlend(smoke, force, WHITE));
@@ -268,48 +223,48 @@ void Extrapolate(Fluid *fluid)
 {
     for_n(x, 0, fluid->grid_dim_x)
     {
-        get(u1, x, 0)                   = get(u1, x, 1);
-        get(u1, x, fluid->grid_dim_y-1) = get(u1, x, fluid->grid_dim_y-2);
+        get(u, x, 0)                   = get(u, x, 1);
+        get(u, x, fluid->grid_dim_y-1) = get(u, x, fluid->grid_dim_y-2);
     }
     for_n(y, 0, fluid->grid_dim_y)
     {
-        get(v1, 0, y)                   = get(v1, 1, y);
-        get(v1, fluid->grid_dim_x-1, y) = get(v1, fluid->grid_dim_x-2, y);
+        get(v, 0, y)                   = get(v, 1, y);
+        get(v, fluid->grid_dim_x-1, y) = get(v, fluid->grid_dim_x-2, y);
     }
 }
 
 #define Fluid_Sample Fluid_Sample_U
-#define field u1
+#define field u
 #include "fluid_sample.inl"
 #undef field
 #undef Fluid_Sample
 
 #define Fluid_Sample Fluid_Sample_V
-#define field v1
+#define field v
 #include "fluid_sample.inl"
 #undef field
 #undef Fluid_Sample
 
 #define Fluid_Sample Fluid_Sample_M
-#define field m1
+#define field m
 #include "fluid_sample.inl"
 #undef field
 #undef Fluid_Sample
 
 f32 Fluid_AverageU(Fluid *fluid, int x, int y)
 {
-    return 0.25f * (get(u1, x+1, y) + get(u1, x, y) + get(u1, x+1, y-1) + get(u1, x, y-1));
+    return 0.25f * (get(u, x+1, y) + get(u, x, y) + get(u, x+1, y-1) + get(u, x, y-1));
 }
 
 f32 Fluid_AverageV(Fluid *fluid, int x, int y)
 {
-    return 0.25f * (get(v1, x-1, y) + get(v1, x, y) + get(v1, x-1, y+1) + get(v1, x, y+1));
+    return 0.25f * (get(v, x-1, y) + get(v, x, y) + get(v, x-1, y+1) + get(v, x, y+1));
 }
 
 void AdvectVelocity(Fluid *fluid, f32 dt)
 {
-    copy(u2, u1);
-    copy(v2, v1);
+    copy(t1, u);
+    copy(t2, v);
 
     f32 h = fluid->cell_size;
 
@@ -318,29 +273,29 @@ void AdvectVelocity(Fluid *fluid, f32 dt)
     {
         if (get(s, x, y) != 0.0f && get(s, x-1, y) != 0.0f && y < fluid->grid_dim_y - 1)
         {
-            f32 vx = get(u1, x, y);
+            f32 vx = get(u, x, y);
             f32 vy = Fluid_AverageV(fluid, x, y);
             f32 px = (f32)(x) * h - dt * vx;
             f32 py = (f32)(y) * h + h * 0.5f - dt * vy;
-            get(u2, x, y) = Fluid_Sample_U(fluid, px, py);
+            get(t1, x, y) = Fluid_Sample_U(fluid, px, py);
         }
         if (get(s, x, y) != 0.0f && get(s, x, y-1) != 0.0f && x < fluid->grid_dim_x - 1)
         {
             f32 vx = Fluid_AverageU(fluid, x, y);
-            f32 vy = get(v1, x, y);
+            f32 vy = get(v, x, y);
             f32 px = (f32)(x) * h + h * 0.5f - dt * vx;
             f32 py = (f32)(y) * h - dt * vy;
-            get(v2, x, y) = Fluid_Sample_V(fluid, px, py);
+            get(t2, x, y) = Fluid_Sample_V(fluid, px, py);
         }
     }
 
-    copy(u1, u2);
-    copy(v1, v2);
+    copy(u, t1);
+    copy(v, t2);
 }
 
 void AdvectSmoke(Fluid *fluid, f32 dt)
 {
-    copy(m2, m1);
+    copy(t1, m);
 
     f32 h = fluid->cell_size;
 
@@ -349,15 +304,15 @@ void AdvectSmoke(Fluid *fluid, f32 dt)
     {
         if (get(s, x, y) != 0.0f && get(s, x, y-1) != 0.0f)
         {
-            f32 u = 0.5f * (get(u1, x, y) + get(u1, x+1, y));
-            f32 v = 0.5f * (get(v1, x, y) + get(v1, x, y+1));
+            f32 u = 0.5f * (get(u, x, y) + get(u, x+1, y));
+            f32 v = 0.5f * (get(v, x, y) + get(v, x, y+1));
             f32 px = (f32)(x) * h + 0.5f * h - dt * u;
             f32 py = (f32)(y) * h + 0.5f * h - dt * v;
-            get(m2, x, y) = Fluid_Sample_M(fluid, px, py);
+            get(t1, x, y) = Fluid_Sample_M(fluid, px, py);
         }
     }
 
-    copy(m1, m2);
+    copy(m, t1);
 }
 
 void Project(Fluid *fluid, int iters, f32 dt)
@@ -380,13 +335,13 @@ void Project(Fluid *fluid, int iters, f32 dt)
             continue;
         }
 
-        f32 div = get(u1, x+1, y) - get(u1, x, y) + get(v1, x, y+1) - get(v1, x, y);
+        f32 div = get(u, x+1, y) - get(u, x, y) + get(v, x, y+1) - get(v, x, y);
         f32 p = -1.9 * div / s;
 
-        get(u1, x+0, y) -= sx0 * p;
-        get(u1, x+1, y) += sx1 * p;
-        get(v1, x, y+0) -= sy0 * p;
-        get(v1, x, y+1) += sy1 * p;
+        get(u, x+0, y) -= sx0 * p;
+        get(u, x+1, y) += sx1 * p;
+        get(v, x, y+0) -= sy0 * p;
+        get(v, x, y+1) += sy1 * p;
     }
 }
 
@@ -397,7 +352,7 @@ void Heat(Fluid *fluid)
     {
         if (get(s, x, y) != 0.0f && get(s, x, y-1) != 0.0f)
         {
-            get(v1, x, y) -= HEAT_CONSTANT * get(m1, x, y);
+            get(v, x, y) -= HEAT_CONSTANT * get(m, x, y);
         }
     }
 }
@@ -405,7 +360,7 @@ void Heat(Fluid *fluid)
 void ApplyControl(Fluid *fluid, Wind_Force *controls, int control_count, f32 t)
 {
     f32 h = fluid->cell_size;
-
+#if 0
     for_n(y, 2, fluid->grid_dim_y-2)
     for_n(x, 2, fluid->grid_dim_x-2)
     for_n(i, 0, control_count)
@@ -429,9 +384,46 @@ void ApplyControl(Fluid *fluid, Wind_Force *controls, int control_count, f32 t)
         f32 acc_y = controls[i].strength * controls[i].strength * dir_y * space_magnitude * time_magnitude;
 
         // Add to velocity field
-        get(u1, x, y) += acc_x;
-        get(v1, x, y) += acc_y;
+        get(u, x, y) += acc_x;
+        get(v, x, y) += acc_y;
     }
+#else
+    f32 const eps = 0.00001f;
+    for_n(i, 0, control_count)
+    {
+        int r = controls[i].radius * 2.0f;
+        int x0 = max_int((int)((controls[i].x - r + h*0.5f)/h), 2);
+        int x1 = min_int((int)((controls[i].x + r + h*0.5f)/h), fluid->grid_dim_x-3) + 1;
+        int y0 = max_int((int)((controls[i].y - r + h*0.5f)/h), 2);
+        int y1 = min_int((int)((controls[i].y + r + h*0.5f)/h), fluid->grid_dim_y-3) + 1;
+
+        // How strong the gaussian is in time
+        f32 dt = controls[i].t - t;
+        f32 time_magnitude = expf(-1.0f * dt * dt / (controls[i].interval * controls[i].interval + eps));
+        
+        f32 dir_x = cosf(controls[i].theta);
+        f32 dir_y = sinf(controls[i].theta);
+        f32 acc_x = controls[i].strength * controls[i].strength * dir_x * time_magnitude;
+        f32 acc_y = controls[i].strength * controls[i].strength * dir_y * time_magnitude;
+        
+        for_n(y, y0, y1)
+        for_n(x, x0, x1)
+        {
+            f32 cell_center_x = (f32)(x)*h + h*0.5f;
+            f32 cell_center_y = (f32)(y)*h + h*0.5f;
+            f32 dx = cell_center_x - controls[i].x;
+            f32 dy = cell_center_y - controls[i].y;
+            f32 r2 = dx*dx + dy*dy;
+            
+            // How strong the gaussian is in space
+            f32 space_magnitude = expf(-1.0f * r2 / (controls[i].radius * controls[i].radius + eps));
+            
+            // Add to velocity field
+            get(u, x, y) += acc_x * space_magnitude;
+            get(v, x, y) += acc_y * space_magnitude;
+        }
+    }
+#endif
 }
 
 void Fluid_Update(Fluid *fluid, Wind_Force *controls, int control_count, f32 t, f32 dt)
@@ -452,7 +444,7 @@ f32 MatchKeyframe(Fluid *fluid, Wind_Force *controls, int control_count, Keyfram
     for_n(x, 0, frame->dim_x)
     {
         f32 target = frame->values[y*frame->dim_x+x];
-        f32 real = get(m1, x+1, y+1);
+        f32 real = get(m, x+1, y+1);
         f32 image_difference = real - target;
         f32 image_contribution = image_difference * image_difference;
         data_term += image_contribution;
@@ -464,43 +456,10 @@ f32 MatchKeyframe(Fluid *fluid, Wind_Force *controls, int control_count, Keyfram
         f32 control_contribution = CONTROL_PENALTY * volume * controls[i].strength * controls[i].strength;
         regularization_term += control_contribution;
     }
-    //LOG("t = %.4f, data = %.5f\n", t, data_term);
-    //LOG("t = %.4f, reg. = %.5f\n", t, regularization_term);
-    //LOG("%.4f, %.5f\n", t, data_term);
     ACCUMULATE_DATA(data_term);
     ACCUMULATE_REGULARIZATION(regularization_term);
     return data_term + regularization_term;
 }
-
-#if 0
-void MatchKeyframe_Simplified(float *objective, Wind_Force *controls, int control_count, float t)
-{
-    for_n(i, 0, control_count)
-    {
-        f32 volume = (f32)(M_PI) * controls[i].strength * controls[i].radius;
-        f32 dt = t - controls[i].t;
-        f32 time_magnitude = expf(-1.0f * dt * dt / controls[i].interval);
-        f32 control_contribution = CONTROL_PENALTY * time_magnitude * volume;
-        *objective += control_contribution;
-    }
-}
-
-void __enzyme_autodiff_MatchKeyframe_Simplified(void *fn,
-    float *objective, float *d_objective, Wind_Force *controls, Wind_Force *d_controls, int control_count,
-    float t);
-
-void rev_MatchKeyframe_Simplified(float *objective, Wind_Force *controls, Wind_Force *d_controls, int control_count, float t)
-{
-    float d_objective = 1.0f;
-    float d_t = 0.0f;
-    __enzyme_autodiff_MatchKeyframe_Simplified((void*)(MatchKeyframe_Simplified),
-        objective, &d_objective,
-        controls, d_controls,
-        control_count,
-        t
-    );
-}
-#endif
 
 void Fluid_ControlMethod(f32 *objective, Fluid *fluid, Wind_Force *controls, int control_count, Keyframe *frame, Parameters* parameters)
 {
@@ -541,63 +500,6 @@ void fwd_Fluid_ControlMethod(f32 *objective, f32 *d_objective, Fluid *fluid, Flu
         enzyme_const, frame,
         enzyme_const, parameters
     );
-}
-
-void SaveControls(const char *filename, Wind_Force *controls, size_t count)
-{
-    FILE *f = fopen(filename, "wb");
-    assert(f != NULL);
-    assert(fwrite(&count, sizeof(count), 1, f) == 1);
-    assert(fwrite(controls, sizeof(Wind_Force), count, f) == count);
-    assert(fclose(f) == 0);
-    info("[%s] Saved controls (count = %zu)", filename, count);
-}
-
-Wind_Force *LoadControls(const char *filename, int *out_count)
-{
-    size_t count = 0;
-    FILE *fp = fopen(filename, "rb");
-    assert(fp != NULL);
-    assert(fread(&count, sizeof(count), 1, fp) == 1);
-    Wind_Force *forces = malloc(count * sizeof(Wind_Force));
-    assert(forces != NULL);
-    assert(fread(forces, sizeof(Wind_Force), count, fp) == count);
-    assert(fclose(fp) == 0);
-    *out_count = (int)(count);
-    info("[%s] Loaded controls", filename);
-    return forces;
-}
-
-Wind_Force *RandomControls(Fluid *fluid, int count, uint32_t seed)
-{
-    srand(seed);
-    Wind_Force *forces = malloc(count * sizeof(Wind_Force));
-    for_n(i, 0, count)
-    {
-        forces[i] = (Wind_Force) {
-            .x        = random_range_f32(200.0f, 270.0f),
-            .y        = random_range_f32(270.0f, 200.0f),
-            .radius   = 5.0f,
-            .theta    = random_f32() * 2.0f * (f32)(M_PI),
-            .strength = 3.0f,
-            .t        = random_range_f32(0.7f, 0.6f),
-            .interval = random_range_f32(1.0f, 0.05f),
-        };
-    }
-    return forces;
-}
-
-Wind_Force *ZeroControls(int count)
-{
-    return calloc(count, sizeof(Wind_Force));
-}
-
-void Controls_Clear(Wind_Force *controls, int count)
-{
-    for_n(i, 0, count)
-    {
-        controls[i] = (Wind_Force) {0};
-    }
 }
 
 void Controls_Update(Wind_Force *controls, Wind_Force *d_controls, int count, float c)
@@ -679,7 +581,7 @@ void Controls_FromDoubleArray(Wind_Force *dst_controls, double const *src, int c
 {
     int count_f32 = 0;
     f32 *array_f32 = Controls_ToFloatArray(dst_controls, count, &count_f32);
-    for_n(i, 0, count)
+    for_n(i, 0, count_f32)
     {
         array_f32[i] = (f32)(src[i]);
     }
@@ -690,7 +592,7 @@ double *Controls_ToDoubleArray(Wind_Force *controls, int count)
     int count_f32 = 0;
     f32 *array_f32 = Controls_ToFloatArray(controls, count, &count_f32);
     double *dst = alloc(sizeof(double), count_f32);
-    for_n(i, 0, count)
+    for_n(i, 0, count_f32)
     {
         dst[i] = (double)(array_f32[i]);
     } 
@@ -737,12 +639,26 @@ Keyframe LoadKeyframe(const char *filename)
         .values = malloc(sizeof(f32) * image.width * image.height),
     };
 
-    for_n(y, 0, frame.dim_y)
-    for_n(x, 0, frame.dim_x)
+    if (strstr(filename, ".smoke") != NULL)
     {
-        Vector4 pixel = ColorNormalize(GetImageColor(image, x, y));
-        f32 value = pixel.w / (1.0f - pixel.w);
-        frame.values[y*frame.dim_x+x] = value;
+        for_n(y, 0, frame.dim_y)
+        for_n(x, 0, frame.dim_x)
+        {
+            Vector4 pixel = ColorNormalize(GetImageColor(image, x, y));
+            f32 value = pixel.w / (1.0f - pixel.w);
+            frame.values[y*frame.dim_x+x] = value;
+        }
+    }
+    else
+    {
+        for_n(y, 0, frame.dim_y)
+        for_n(x, 0, frame.dim_x)
+        {
+            Vector4 pixel = ColorNormalize(GetImageColor(image, x, y));
+            f32 lum = luminance(pixel.x, pixel.y, pixel.z);
+            f32 value = lum / (1.0f - lum);
+            frame.values[y*frame.dim_x+x] = value;
+        }
     }
 
     UnloadImage(image);
@@ -764,18 +680,19 @@ void Keyframe_Draw(Keyframe *frame, f32 h)
 
 int test_finitediff(void)
 {
-    Fluid fluid = Fluid_Create(4.0f, 100, 100);
-    Fluid d_fluid = Fluid_Create(4.0f, 100, 100);
+    Config config = Config_Default();
+    Fluid fluid = Fluid_Create(config.cell_size, config.width, config.height);
+    Fluid d_fluid = Fluid_Create(config.cell_size, config.width, config.height);
     Keyframe initial_keyframe = LoadKeyframe("initial.smoke.png");
     Keyframe target_keyframe = LoadKeyframe("target.smoke.png");
     Parameters parameters = {
-        .num_timesteps = 100,
-        .step_size = 0.02f,
-        .final_t = (f32)(100) * 0.02f,
+        .num_timesteps = config.keyframe_times[1],
+        .step_size = config.step_size,
+        .final_t = (f32)(config.keyframe_times[1]) * config.step_size,
     };
 
-    int control_count = 100;
-    Wind_Force *random_controls = RandomControls(&fluid, control_count, 0x6767);
+    int control_count = 1000;
+    Wind_Force *random_controls = RandomControls(&config, control_count, 0x6767);
     Wind_Force *controls = ZeroControls(control_count);
     Wind_Force *d_controls = ZeroControls(control_count);
 
@@ -855,17 +772,18 @@ int test_finitediff(void)
 
 int test_run(void)
 {
-    Fluid fluid = Fluid_Create(4.0f, 100, 100);
+    Config config = Config_Default();
+    Fluid fluid = Fluid_Create(config.cell_size, config.width, config.height);
     Keyframe initial_keyframe = LoadKeyframe("initial.smoke.png");
     Keyframe target_keyframe = LoadKeyframe("target.smoke.png");
     Parameters parameters = {
-        .num_timesteps = 100,
-        .step_size = 0.02f,
-        .final_t = (f32)(100) * 0.02f,
+        .num_timesteps = config.keyframe_times[1],
+        .step_size = config.step_size,
+        .final_t = (f32)(config.keyframe_times[1]) * config.step_size,
     };
 
     int control_count = 100;
-    Wind_Force *controls = RandomControls(&fluid, control_count, 0x6767);
+    Wind_Force *controls = RandomControls(&config, control_count, 0x6767);
 
     Fluid_Reset(&fluid);
     Fluid_Set(&fluid, &initial_keyframe);
@@ -887,24 +805,12 @@ int test(const char *name)
     return 1;
 }
 
-typedef struct {
-    Fluid       fluid;
-    Fluid       d_fluid;
-    Wind_Force *controls;
-    Wind_Force *d_controls;
-    Keyframe    initial;
-    Keyframe    target;
-    Parameters  parameters;
-    int         control_count;
-    int         iter;
-} Fluid_Objective_Data;
-
 double Fluid_Objective(unsigned n, const double *x, double *grad, void *data)
 {
     Fluid_Objective_Data *d = (Fluid_Objective_Data*) data;
     float objective = 0.0f;
     Controls_FromDoubleArray(d->controls, x, d->control_count);
-    SaveControls(TextFormat("int/optimized_%i.controls", d->iter++), d->controls, d->control_count);
+    Controls_SaveToFile(TextFormat("%s/%i.controls", d->output_dir, d->iter++), d->controls, d->control_count);
     if (grad) {
         Fluid_Reset(&d->fluid);
         Fluid_Reset(&d->d_fluid);
@@ -935,61 +841,120 @@ double Fluid_Objective(unsigned n, const double *x, double *grad, void *data)
     return (double)(objective);
 }
 
+static lbfgsfloatval_t evaluate(
+    void *instance,
+    const lbfgsfloatval_t *x,
+    lbfgsfloatval_t *g,
+    const int n,
+    const lbfgsfloatval_t step
+    )
+{
+    Fluid_Objective_Data *d = (Fluid_Objective_Data*) instance;
+    float objective = 0.0f;
+    Controls_FromFloatArray(d->controls, x, d->control_count);
+    Controls_SaveToFile(TextFormat("int/optimized_%i.controls", d->iter++), d->controls, d->control_count);
+    Fluid_Reset(&d->fluid);
+    Fluid_Reset(&d->d_fluid);
+    Fluid_Set(&d->fluid, &d->initial);
+    Controls_Clear(d->d_controls, d->control_count);
+    rev_Fluid_ControlMethod(
+        &objective,
+        &d->fluid, &d->d_fluid,
+        d->controls, d->d_controls, d->control_count,
+        &d->target, &d->parameters
+    );
+    int count = 0;
+    f32 *new_g = Controls_ToFloatArray(d->d_controls, d->control_count, &count);
+    assert(count == n);
+    for_n(i, 0, n)
+    {
+        g[i] = new_g[i];
+    }
+    return objective;
+}
+
+bool CaptureFrame(const char *output_dir, int frame_count)
+{
+    static int frame_index = 0;
+    if (frame_index >= 0 && frame_index <= frame_count)
+    {
+        Image image = LoadImageFromScreen();
+        ExportImage(image, TextFormat("%s/%i.png", output_dir, frame_index));
+        UnloadImage(image);
+        frame_index += 1;
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char *argv[])
 {
     // Parse command line
     int optimize = 0;
+    int frame_count = 0;
     uint32_t seed = 0x6767;
     int stop_at_final_timestep = 0;
     char *control_filename = 0;
-    for (int i = 1; i < argc; ++i) if (0);
-        else if (strcmp(argv[i], "stop") == 0)
-            stop_at_final_timestep = 1;
-        else if (strcmp(argv[i], "seed") == 0)
-            seed = strtoul(argv[++i], 0, 10);
-        else if (strcmp(argv[i], "opt") == 0)
-            optimize = 1;
-        else if (strcmp(argv[i], "load") == 0 && i + 1 < argc)
-            control_filename = argv[++i];
-        else if (strcmp(argv[i], "test") == 0 && i + 1 < argc)
-            return test(argv[++i]);
+    char render_dir[64] = {};
+    Config config = Config_Default();
 
-    Fluid fluid = Fluid_Create(4.0f, 100, 100);
-    Fluid d_fluid = Fluid_Create(4.0f, 100, 100);
+    #define equal(a)         (strcmp(argv[i], a) == 0)
+    #define equal_with(a, n) (strcmp(argv[i], a) == 0 && i + n < argc)
+
+    for (int i = 1; i < argc; ++i) if (0);
+    else if equal("stop")           stop_at_final_timestep = 1;
+    else if equal("opt")            optimize = 1;
+    else if equal_with("seed", 1)   seed = strtoul(argv[++i], 0, 10);
+    else if equal_with("load", 1)   control_filename = argv[++i];
+    else if equal_with("test", 1)   return test(argv[++i]);
+    else if equal_with("render", 1)
+        CreateRenderDir(config.name, render_dir),
+        frame_count = (int)(strtol(argv[++i], 0, 10));
+    else assert(Config_Load(argv[i], &config) == 0);
+
+    Config_Print(&config, stdout);
+
+    Fluid fluid   = Fluid_Create(config.cell_size, config.width, config.height);
+    Fluid d_fluid = Fluid_Create(config.cell_size, config.width, config.height);
     if (!optimize)
     {
         int width, height;
         Fluid_Dimensions(&fluid, &width, &height);
         InitWindow(width, height, __FILE__);
+        SetTargetFPS(config.framerate);
     }
     Fluid_Reset(&fluid);
 
-    int control_count = 100;
+    int control_count = config.num_controls;
     Wind_Force *controls;
 
     if (control_filename)
-        controls = LoadControls(control_filename, &control_count);
+        controls = Controls_LoadFromFile(control_filename, &control_count);
     else
-        controls = RandomControls(&fluid, control_count, seed);
+        controls = RandomControls(&config, control_count, seed);
 
-    Keyframe initial_keyframe = LoadKeyframe("initial.smoke.png");
-    Keyframe target_keyframe = LoadKeyframe("target.smoke.png");
-    Fluid_Set(&fluid, &initial_keyframe);
+    Keyframe initial_keyframe, target_keyframe;
+    if (config.num_keyframes > 0) {
+        initial_keyframe = LoadKeyframe(TextFormat("configs/keyframes/%s", config.keyframes[0]));
+        target_keyframe = LoadKeyframe(TextFormat("configs/keyframes/%s", config.keyframes[1]));
+        Fluid_Set(&fluid, &initial_keyframe);
+    }
 
     Parameters parameters = {
-        .num_timesteps = 100,
-        .step_size = 0.02f,
-        .final_t = (f32)(100) * 0.02f,
+        .num_timesteps = config.keyframe_times[1],
+        .step_size = config.step_size,
+        .final_t = (f32)(config.keyframe_times[1]) * config.step_size,
     };
 
     if (optimize)
     {
-        SaveControls("initial.controls", controls, control_count);
+        Controls_SaveToFile("initial.controls", controls, control_count);
         Wind_Force *d_controls = ZeroControls(control_count);
         Adam adam = Adam_InitAndClear(control_count);
 
         printf("Begin optimization!\n");
 
+        if (1)
         {
             Fluid_Objective_Data data = {
                 .fluid = fluid,
@@ -1001,6 +966,7 @@ int main(int argc, char *argv[])
                 .target = target_keyframe,
                 .parameters = parameters,
             };
+            CreateOutputDir(config.name, data.output_dir);
 
             unsigned int n = (unsigned int)(control_count) * sizeof(Wind_Force) / sizeof(float);    
             nlopt_opt opt = nlopt_create(NLOPT_LD_LBFGS, n); /* algorithm and dimensionality */
@@ -1017,11 +983,49 @@ int main(int argc, char *argv[])
             else {
                 printf("found minimum at f(x) = %0.10g\n", minf);
                 Controls_FromDoubleArray(controls, x, control_count);
-                SaveControls("optimized_nlopt.controls", controls, control_count);
+                Controls_SaveToFile("optimized_nlopt.controls", controls, control_count);
             }
             printf("done\n");
             exit(0);
         }
+        #if (0)
+        {
+            Fluid_Objective_Data data = {
+                .fluid = fluid,
+                .d_fluid = d_fluid,
+                .controls = controls,
+                .d_controls = d_controls,
+                .control_count = control_count,
+                .initial = initial_keyframe,
+                .target = target_keyframe,
+                .parameters = parameters,
+            };
+
+            unsigned int n = (unsigned int)(control_count) * sizeof(Wind_Force) / sizeof(float);    
+
+            lbfgs_parameter_t param;
+            lbfgs_parameter_init(&param);
+            param.m = 10;
+            param.max_iterations = 1000;
+            param.linesearch = LBFGS_LINESEARCH_BACKTRACKING_ARMIJO;
+
+            void *Fluid_LBFGS_Evaluate;
+            void *Fluid_LBFGS_Progress;
+            double *x = Controls_ToFloatArray(controls, control_count);
+            double minf;
+            int result = lbfgs(n, x, &minf, Fluid_LBFGS_Evaluate, Fluid_LBFGS_Progress, &data, &param);
+            if (result < 0) {
+                printf("lbfgs failed! (%i)\n", result);
+            }
+            else {
+                printf("found minimum at f(x) = %0.10g\n", minf);
+                Controls_FromDoubleArray(controls, x, control_count);
+                Controls_SaveToFile("optimized_nlopt.controls", controls, control_count);
+            }
+            printf("done\n");
+            exit(0);
+        }
+        #endif
 
         for (int iter = 1; iter <= 2000; iter++)
         {
@@ -1030,16 +1034,6 @@ int main(int argc, char *argv[])
             Fluid_Reset(&d_fluid);
             Fluid_Set(&fluid, &initial_keyframe);
             Controls_Clear(d_controls, control_count);
-#if 0
-            SaveControls("initial.controls", controls, 1);
-            f32 obj1 = 0.0f;
-            MatchKeyframe_Simplified(&obj1, controls, 1, 2.0f);
-            f32 obj2 = 0.0f;
-            rev_MatchKeyframe_Simplified(&obj2, controls, d_controls, 1, 2.0f);
-            SaveControls("grad.controls", d_controls, 1);
-            printf("obj2 = %.5f =? %.5f\n", obj1, obj2);
-            exit(1);
-#endif      
 
             // Solve for gradient
             f32 objective = 0.0f;
@@ -1052,29 +1046,32 @@ int main(int argc, char *argv[])
             printf("objective = %.1f\n", objective);
 
             if (iter == 1) {
-                SaveControls("grad.controls", d_controls, control_count);
+                Controls_SaveToFile("grad.controls", d_controls, control_count);
             }
 
             // Update controls
             Controls_Update(controls, d_controls, control_count, -0.00025f);
             //Controls_UpdateAdam(controls, d_controls, control_count, iter, &adam, 0.0000001f, 0.9f, 0.999f);
 
-            const char* optimized_filename = TextFormat("optimized_%i.controls", iter);
+            const char* optimized_filename = TextFormat("int/optimized_%i.controls", iter);
 
             // Write out new controls
-            SaveControls(optimized_filename, controls, control_count);
-            // SaveControls("grad.controls", d_controls, control_count);
+            Controls_SaveToFile(optimized_filename, controls, control_count);
+            // Controls_SaveToFile("grad.controls", d_controls, control_count);
             //exit(0);
         }
     }
 
     Camera2D camera = { .zoom = 1 };
-    Font font = LoadFontEx("GoogleSansCode-Regular.ttf", 64, 0, 0);
+    Font font = LoadFontEx("assets/GoogleSansCode-Regular.ttf", 64, 0, 0);
     Vector2 mouse_position = GetScreenToWorld2D(GetMousePosition(), camera);
     Interection_Type interact_type = Interact_Smoke;
     bool simulate = false;
+    bool draw_controls = false;
     f32 t = 0.0f;
     int step = 0;
+
+    if (frame_count > 0) simulate = true;
 
     while (!WindowShouldClose())
     {
@@ -1094,11 +1091,12 @@ int main(int argc, char *argv[])
             t = 0;
             step = 0;
         }
-        if (IsKeyPressed(KEY_SPACE)) { simulate = !simulate; }
-        if (IsKeyPressed(KEY_ONE))   { interact_type = Interact_Smoke; }
-        if (IsKeyPressed(KEY_TWO))   { interact_type = Interact_Velocity; }
-        if (IsKeyPressed(KEY_THREE)) { interact_type = Interact_Smoke_And_Velocity; }
-        if (IsKeyPressed(KEY_FOUR))  { interact_type = Interact_Obstacle; }
+        if (IsKeyPressed(KEY_SPACE)) simulate = !simulate;
+        if (IsKeyPressed(KEY_C))     draw_controls = !draw_controls;
+        if (IsKeyPressed(KEY_ONE))   interact_type = Interact_Smoke;
+        if (IsKeyPressed(KEY_TWO))   interact_type = Interact_Velocity;
+        if (IsKeyPressed(KEY_THREE)) interact_type = Interact_Smoke_And_Velocity;
+        if (IsKeyPressed(KEY_FOUR))  interact_type = Interact_Obstacle;
         if (simulate)
         {
             f32 dt = parameters.step_size;
@@ -1114,12 +1112,21 @@ int main(int argc, char *argv[])
         BeginDrawing();
         ClearBackground(BLACK);
         BeginMode2D(camera);
-        Fluid_Draw(&fluid, controls, control_count, t);
-        if (IsKeyDown(KEY_K)) { Keyframe_Draw(&target_keyframe, fluid.cell_size); }
+        Fluid_Draw(&fluid, controls, control_count, t, frame_count > 0, draw_controls);
+        if (IsKeyDown(KEY_K)) Keyframe_Draw(&target_keyframe, fluid.cell_size);
         EndMode2D();
-        const char *text = TextFormat("%i FPS (%.3f) step = %i", GetFPS(), t, step);
-        DrawTextEx(font, text, (Vector2){5, 5}, 16, 1.0f, BLACK);
-        DrawTextEx(font, text, (Vector2){4, 4}, 16, 1.0f, RAYWHITE);
+        if (frame_count == 0)
+        {
+            const char *text = TextFormat("%i FPS (%.3f) step = %i", GetFPS(), t, step);
+            DrawTextEx(font, text, (Vector2){5, 5}, 16, 1.0f, BLACK);
+            DrawTextEx(font, text, (Vector2){4, 4}, 16, 1.0f, RAYWHITE);
+        }
         EndDrawing();
+
+        if (frame_count > 0)
+        {
+            if (CaptureFrame(render_dir, frame_count))
+                break;
+        }
     }
 }

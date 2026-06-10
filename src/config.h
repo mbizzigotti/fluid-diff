@@ -11,6 +11,7 @@ static inline Config Config_Default()
 {
     return (Config) {
         .name = "unnamed",
+        .framerate = 24,
         .method = Method_Gradient_Decent,
         .step_size = 0.02f,
         .width = 100,
@@ -25,8 +26,10 @@ static inline void Config_Print(Config *config, FILE *f)
 {
     fprintf(f, "[parameters]\n");
     fprintf(f, "name=%s\n", config->name);
+    fprintf(f, "framerate=%i\n", config->framerate);
     fprintf(f, "method=%s\n", Method_Name(config->method));
     fprintf(f, "stepsize=%f\n", config->step_size);
+    fprintf(f, "cellsize=%f\n", config->cell_size);
     fprintf(f, "width=%i\n", config->width);
     fprintf(f, "height=%i\n", config->height);
     fprintf(f, "controls=%i\n", config->num_controls);
@@ -45,13 +48,14 @@ static inline int __config(void* user, const char* section, const char* name, co
     else if (0==strcmp(section, "parameters"))
     {
         if (0);
-        else if (0==strcmp(name, "name"))     config->name = clone_cstring(value);
-        else if (0==strcmp(name, "method"))   parse_method(value, &config->method);
-        else if (0==strcmp(name, "stepsize")) parse_f32(value, &config->step_size);
-        else if (0==strcmp(name, "cellsize")) parse_f32(value, &config->cell_size);
-        else if (0==strcmp(name, "width"))    parse_int(value, &config->width);
-        else if (0==strcmp(name, "height"))   parse_int(value, &config->height);
-        else if (0==strcmp(name, "controls")) parse_int(value, &config->num_controls);
+        else if (0==strcmp(name, "name"))      config->name = clone_cstring(value);
+        else if (0==strcmp(name, "framerate")) parse_int(value, &config->framerate);
+        else if (0==strcmp(name, "method"))    parse_method(value, &config->method);
+        else if (0==strcmp(name, "stepsize"))  parse_f32(value, &config->step_size);
+        else if (0==strcmp(name, "cellsize"))  parse_f32(value, &config->cell_size);
+        else if (0==strcmp(name, "width"))     parse_int(value, &config->width);
+        else if (0==strcmp(name, "height"))    parse_int(value, &config->height);
+        else if (0==strcmp(name, "controls"))  parse_int(value, &config->num_controls);
         else return 0; /* unknown section/name, error */
     }
     else if (0==strcmp(section, "keyframes"))
