@@ -20,3 +20,7 @@ NOTE: You must specify the compiler because EnzymeAD only works with LLVM.
 ```bash
 cmake --build build
 ```
+
+# More Renders
+
+![연기](renders/yeongi.gif)

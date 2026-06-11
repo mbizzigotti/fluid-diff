@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <sys/resource.h>
 #include "nlopt.h"
 #include "3rdparty/lbfgs.h"
 #include "raylib.h"
@@ -188,8 +189,29 @@ void Fluid_Draw(Fluid *fluid, Wind_Force *forces, int force_count, f32 t, bool d
     }
 }
 
+void Fluid_DrawPixels(Color *pixels, Fluid *fluid, Wind_Force *forces, int force_count, f32 t, bool draw_for_render, bool draw_controls)
+{
+    f32 h = fluid->cell_size;
+    for_n(y, 0, fluid->grid_dim_y)
+    for_n(x, 0, fluid->grid_dim_x)
+    {
+        Vector2 position = { (f32)(x) * h, (f32)(y) * h };
+        Vector2 size = { h, h };
+        if (get(s, x, y) == 0.0f)
+        {
+            pixels[(y)*fluid->grid_dim_x+(x)] = (Color){};
+            continue;
+        }
+        f32 c = draw_for_render ? 3.0f : 1.0f;
+        f32 value = c * get(m, x, y);
+        Color smoke = ColorAlpha(WHITE, value / (value + 1.0f));
+        pixels[(y)*fluid->grid_dim_x+(x)] = smoke;
+    }
+}
+
 void Camera_Update(Camera2D *camera)
 {
+    // Adapted from https://github.com/raysan5/raylib/blob/master/examples/core/core_2d_camera_mouse_zoom.c
     // Translate based on mouse right click
     if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
     {
@@ -892,7 +914,8 @@ int main(int argc, char *argv[])
     // Parse command line
     int optimize = 0;
     int frame_count = 0;
-    uint32_t seed = 0x6767;
+    int eval = 0;
+    uint32_t seed = (uint32_t)(time(0));
     int stop_at_final_timestep = 0;
     char *control_filename = 0;
     char render_dir[64] = {};
@@ -901,9 +924,12 @@ int main(int argc, char *argv[])
     #define equal(a)         (strcmp(argv[i], a) == 0)
     #define equal_with(a, n) (strcmp(argv[i], a) == 0 && i + n < argc)
 
+    //////////////////////////////////////////////////////////////////
+    // Command line parsing
     for (int i = 1; i < argc; ++i) if (0);
     else if equal("stop")           stop_at_final_timestep = 1;
     else if equal("opt")            optimize = 1;
+    else if equal("eval")           eval = 1;
     else if equal_with("seed", 1)   seed = strtoul(argv[++i], 0, 10);
     else if equal_with("load", 1)   control_filename = argv[++i];
     else if equal_with("test", 1)   return test(argv[++i]);
@@ -911,12 +937,13 @@ int main(int argc, char *argv[])
         CreateRenderDir(config.name, render_dir),
         frame_count = (int)(strtol(argv[++i], 0, 10));
     else assert(Config_Load(argv[i], &config) == 0);
+    //////////////////////////////////////////////////////////////////
 
     Config_Print(&config, stdout);
 
     Fluid fluid   = Fluid_Create(config.cell_size, config.width, config.height);
     Fluid d_fluid = Fluid_Create(config.cell_size, config.width, config.height);
-    if (!optimize)
+    if (!optimize && !eval)
     {
         int width, height;
         Fluid_Dimensions(&fluid, &width, &height);
@@ -946,9 +973,17 @@ int main(int argc, char *argv[])
         .final_t = (f32)(config.keyframe_times[1]) * config.step_size,
     };
 
+    if (eval)
+    {
+        f32 objective = 0.0f;
+        Fluid_ControlMethod(&objective, &fluid, controls, control_count, &target_keyframe, &parameters);
+        printf("objective = %.5f\n", objective);
+        exit(0);
+    }
+
     if (optimize)
     {
-        Controls_SaveToFile("initial.controls", controls, control_count);
+        //Controls_SaveToFile("initial.controls", controls, control_count);
         Wind_Force *d_controls = ZeroControls(control_count);
         Adam adam = Adam_InitAndClear(control_count);
 
@@ -969,23 +1004,26 @@ int main(int argc, char *argv[])
             CreateOutputDir(config.name, data.output_dir);
 
             unsigned int n = (unsigned int)(control_count) * sizeof(Wind_Force) / sizeof(float);    
-            nlopt_opt opt = nlopt_create(NLOPT_LD_LBFGS, n); /* algorithm and dimensionality */
+            nlopt_opt opt = nlopt_create(NLOPT_LD_LBFGS, n);
             nlopt_set_min_objective(opt, Fluid_Objective, &data);
-            
             Controls_SetBounds(opt, &fluid, &parameters, control_count);
-
             double *x = Controls_ToDoubleArray(controls, control_count);
             double minf;
+
             int result = 0;
+            double start_time = seconds_since_unspecified_epoch();
             if ((result = nlopt_optimize(opt, x, &minf)) < 0) {
                 printf("nlopt failed! (%i)\n", result);
             }
-            else {
-                printf("found minimum at f(x) = %0.10g\n", minf);
-                Controls_FromDoubleArray(controls, x, control_count);
-                Controls_SaveToFile("optimized_nlopt.controls", controls, control_count);
-            }
-            printf("done\n");
+            double duration = seconds_since_unspecified_epoch() - start_time;
+            
+            struct rusage usage;
+            getrusage(RUSAGE_SELF, &usage);
+            info("minimum reached: %0.10g", minf);
+            info("time elapsed: %.1f sec (%s)", duration, FormatDuration(duration));
+            info("peak memory usage: %ld KB", usage.ru_maxrss);
+            Controls_FromDoubleArray(controls, x, control_count);
+            Controls_SaveToFile(TextFormat("%s/optimized.controls", data.output_dir), controls, control_count);
             exit(0);
         }
         #if (0)
@@ -1027,6 +1065,7 @@ int main(int argc, char *argv[])
         }
         #endif
 
+        // NOTE: Standard gradient decent
         for (int iter = 1; iter <= 2000; iter++)
         {
             // Setup initial state
@@ -1058,10 +1097,20 @@ int main(int argc, char *argv[])
             // Write out new controls
             Controls_SaveToFile(optimized_filename, controls, control_count);
             // Controls_SaveToFile("grad.controls", d_controls, control_count);
-            //exit(0);
         }
+        exit(0);
     }
 
+
+    Shader shader = LoadShader(0, "src/shaders/bloom.fs");
+    Image image = {
+        .data = alloc(sizeof(Color), fluid.cell_count),
+        .width = fluid.grid_dim_x,
+        .height = fluid.grid_dim_y,
+        .mipmaps = 1,
+        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
+    };
+    Texture2D texture = LoadTextureFromImage(image);
     Camera2D camera = { .zoom = 1 };
     Font font = LoadFontEx("assets/GoogleSansCode-Regular.ttf", 64, 0, 0);
     Vector2 mouse_position = GetScreenToWorld2D(GetMousePosition(), camera);
@@ -1077,7 +1126,7 @@ int main(int argc, char *argv[])
     {
         Vector2 mouse_position_old = mouse_position;
         mouse_position = GetScreenToWorld2D(GetMousePosition(), camera);
-        Camera_Update(&camera);
+        //Camera_Update(&camera);
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
         {
             f32 dx = mouse_position.x - mouse_position_old.x;
@@ -1109,12 +1158,17 @@ int main(int argc, char *argv[])
                 simulate = false;
             }
         }
+        Fluid_DrawPixels(image.data, &fluid, controls, control_count, t, frame_count > 0, draw_controls);
+        UpdateTexture(texture, image.data);
+
         BeginDrawing();
         ClearBackground(BLACK);
-        BeginMode2D(camera);
-        Fluid_Draw(&fluid, controls, control_count, t, frame_count > 0, draw_controls);
+        BeginShaderMode(shader);
+        DrawTextureEx(texture, (Vector2){0, 0}, 0.0f, fluid.cell_size, WHITE);
+        EndShaderMode();
+        //BeginMode2D(camera);
         if (IsKeyDown(KEY_K)) Keyframe_Draw(&target_keyframe, fluid.cell_size);
-        EndMode2D();
+        //EndMode2D();
         if (frame_count == 0)
         {
             const char *text = TextFormat("%i FPS (%.3f) step = %i", GetFPS(), t, step);

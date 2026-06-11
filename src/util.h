@@ -7,6 +7,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/time.h>
+#include "raylib.h"
 
 #define TAU 6.283185307179586
 
@@ -53,7 +55,7 @@ int IsValidKeyframe(Fluid *fluid, Keyframe *frame)
     return (fluid->grid_dim_x == frame->dim_x + 2) && (fluid->grid_dim_y == frame->dim_y + 2);
 }
 
-void *alloc(size_t size, size_t n)
+static inline void *alloc(size_t size, size_t n)
 {
     size_t const alignment = 256;
     size_t a = size * n;
@@ -145,5 +147,25 @@ void CreateDir(const char *prefix, const char *name, char *folder)
 
 #define CreateOutputDir(N, O) CreateDirWithTimestamp("out", N, O)
 #define CreateRenderDir(N, O) CreateDir("anim", N, O)
+
+static inline const char *FormatDuration(double seconds)
+{
+    int d = (int)(seconds) / 86400;
+    int h = ((int)(seconds) % 86400) / 3600;
+    int m = ((int)(seconds) % 3600) / 60;
+    int s = (int)(seconds) % 60;
+    if (d > 0) return TextFormat("%dd %dh %dm %ds", d, h, m, s);
+    if (h > 0) return TextFormat("%dh %dm %ds", h, m, s);
+    if (m > 0) return TextFormat("%dm %ds", m, s);
+    return TextFormat("%ds", s);
+}
+
+static inline double seconds_since_unspecified_epoch(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t nanos = (1000000000LLU) * ts.tv_sec + ts.tv_nsec;
+    return (double)(nanos) / (1e9);
+}
 
 #endif // UTIL_H
