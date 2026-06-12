@@ -7,6 +7,11 @@ project(Fluid LANGUAGES C CXX)
 find_package(Enzyme REQUIRED CONFIG)
 find_package(raylib REQUIRED)
 find_package(NLopt REQUIRED)
+find_library(COCOA_LIBRARY Cocoa) # MacOS only
+find_package(Vulkan REQUIRED)
+
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(Slang)
 
 # MAIN Smoke Simulation
 
@@ -15,6 +20,19 @@ add_executable(smokey src/smokey.c src/3rdparty/lbfgs.c)
 target_compile_options(smokey PRIVATE -march=native)
 target_compile_definitions(smokey PRIVATE "LBFGS_FLOAT=32")
 target_link_libraries(smokey PRIVATE raylib ClangEnzymeFlags NLopt::nlopt)
+
+# GPU Smoke Simulation
+
+add_executable(smokey-gpu src/smokey-gpu.c)
+if(COCOA_LIBRARY)
+    target_link_libraries(smokey-gpu PRIVATE ${COCOA_LIBRARY})
+endif()
+target_link_libraries(smokey-gpu PRIVATE Vulkan::Vulkan)
+
+add_slang_shaders(smokey-gpu SHADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/Render.slang
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/ApplyControl.slang
+)
 
 # TOOLS
 

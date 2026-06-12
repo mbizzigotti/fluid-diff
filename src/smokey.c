@@ -1146,6 +1146,7 @@ int main(int argc, char *argv[])
         if (IsKeyPressed(KEY_TWO))   interact_type = Interact_Velocity;
         if (IsKeyPressed(KEY_THREE)) interact_type = Interact_Smoke_And_Velocity;
         if (IsKeyPressed(KEY_FOUR))  interact_type = Interact_Obstacle;
+        if (IsKeyPressed(KEY_P))     CaptureFrame("renders", step+10000000);
         if (simulate)
         {
             f32 dt = parameters.step_size;

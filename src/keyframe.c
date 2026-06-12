@@ -44,32 +44,32 @@ int main(int argc, char *argv[])
             ImageDrawRectangle(&image, 15, 55, 70, 10, ColorAlpha(WHITE, tonemap(2.0f/6.0f)));
             ExportImage(image, KEYFRAME_DIR"/test_final.smoke.png");
         }
-        if match("letter")
+        if match("text")
         {
             char *text = argv[++i];
-            int width  = strtol(argv[++i], 0, 10);
             int height = strtol(argv[++i], 0, 10);
 
             int count = 0;
             int *codepoints = LoadCodepoints(text, &count);
-            font = LoadFontEx(font_file, 96, codepoints, count);
+            int font_size = 96;
+            font = LoadFontEx(font_file, font_size, codepoints, count);
+            Vector2 size = MeasureTextEx(font, text, (float)(font_size), 1.0f);
+            int width = (int)(size.x) + 10;
 
             const char *output;
-            image = GenImageColor(width, height, ColorAlpha(BLACK, 0.0f));
-            int left = (width - 10) / 2;
-            int top = height - 10 - 5;
-            ImageDrawRectangle(&image, left, top, 10, 10, ColorAlpha(WHITE, tonemap(4.0f)));
-            output = TextFormat(KEYFRAME_DIR"/letter%s_initial.smoke.png", text);
-            ExportImage(image, output);
+            //image = GenImageColor(width, height, ColorAlpha(BLACK, 0.0f));
+            //int left = (width - 10) / 2;
+            //int top = height - 10 - 5;
+            //ImageDrawRectangle(&image, left, top, 10, 5, ColorAlpha(WHITE, tonemap(4.0f)));
+            //output = TextFormat(KEYFRAME_DIR"/%s_initial.smoke.png", text);
+            //ExportImage(image, output);
             
             Vector2 image_size = { (float)(width), (float)(height) };
-            float font_size = 96.0f;
             image = GenImageColor(width, height, ColorAlpha(BLACK, 0.0f));
-            Vector2 size = MeasureTextEx(font, text, font_size, 1.0f);
             printf("INFO: SIZE: %fx%f\n", size.x, size.y);
             Vector2 position = Vector2Scale(Vector2Subtract(image_size, size), 0.5f);
-            ImageDrawTextEx(&image, font, text, position, font_size, 1.0f, ColorAlpha(WHITE, tonemap(2.0f/12.0f)));
-            output = TextFormat(KEYFRAME_DIR"/letter%s_final.smoke.png", text);
+            ImageDrawTextEx(&image, font, text, position, (float)(font_size), 1.0f, ColorAlpha(WHITE, tonemap(2.0f/12.0f)));
+            output = TextFormat(KEYFRAME_DIR"/%s_final.smoke.png", text);
             ExportImage(image, output);
         }
         if match("tzumaoli")
